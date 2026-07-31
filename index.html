@@ -33,7 +33,7 @@
   html,body{margin:0;padding:0;background:var(--paper);color:var(--ink);
     font-family:-apple-system,BlinkMacSystemFont,"SF Pro Text",system-ui,sans-serif;
     height:auto;-webkit-overflow-scrolling:touch;overscroll-behavior-y:contain;}
-  body{padding-bottom:110px;min-height:100%;}
+  body{padding-bottom:140px;min-height:100%;}
   h1,h2,h3{font-family:-apple-system,BlinkMacSystemFont,"SF Pro Display",system-ui,sans-serif;margin:0;}
 
   /* ---- header ---- */
@@ -142,8 +142,12 @@
 
   /* footer bar */
   .footer-bar{position:fixed;bottom:0;left:0;right:0;background:#fff;border-top:1px solid var(--line);
-    padding:10px 14px calc(10px + env(safe-area-inset-bottom,0px));display:flex;gap:10px;z-index:20;
+    padding:9px 14px calc(10px + env(safe-area-inset-bottom,0px));z-index:20;
     box-shadow:0 -3px 14px rgba(0,0,0,.06);}
+  .footer-note{display:flex;align-items:center;gap:7px;font-size:11.5px;color:var(--ink-soft);
+    padding:0 2px 8px;line-height:1.3;}
+  .footer-note input{flex-shrink:0;}
+  .footer-btn-row{display:flex;gap:10px;}
   .btn{flex:1;padding:13px 0;border-radius:11px;border:none;font-size:14.5px;font-weight:700;text-align:center;}
   .btn-primary{background:var(--navy);color:#fff;}
   .btn-primary:active{background:var(--navy-dark);}
@@ -237,11 +241,7 @@
       </div>
       <div class="mode-banner" id="modeLabel">Move-In selected \u2014 Move-Out fields are locked.</div>
       <div class="photo-note">
-        <label class="photo-note-toggle">
-          <input type="checkbox" id="m_saveoriginals" checked>
-          <span>Also save full-size originals to my Photos app when I take them</span>
-        </label>
-        <div class="photo-note-sub">Photos stored in this app are resized to save space and live only on this device. Turn this on to get a share-sheet prompt for each photo so you can additionally save the full-quality original to your device.</div>
+        <div class="photo-note-sub">Photos are compressed and saved on this device as you add them (not sent anywhere). Full-quality originals for this session can also be saved to your Photos app in one step when you tap Export \u2014 see the checkbox next to the Export button below.</div>
       </div>
     </div>
 
@@ -262,8 +262,14 @@
   </main>
 
   <div class="footer-bar">
-    <button class="btn btn-ghost" id="resetBtn">Reset</button>
-    <button class="btn btn-primary" id="exportBtn2">Export Report</button>
+    <label class="footer-note">
+      <input type="checkbox" id="saveOnExport" checked>
+      <span>Save this session's photos to my Photos app when I export</span>
+    </label>
+    <div class="footer-btn-row">
+      <button class="btn btn-ghost" id="resetBtn">Reset</button>
+      <button class="btn btn-primary" id="exportBtn2">Export Report</button>
+    </div>
   </div>
 </div>
 
@@ -400,6 +406,8 @@
   ];
 
   const CONDS = ["E","G","F","P","D"];
+  const COND_LABELS = {E:"Excellent", G:"Good", F:"Fair", P:"Poor", D:"Damaged"};
+  function condLabel(code){ return COND_LABELS[code] || "\u2013"; }
   const DATA_KEY = "walkthrough:data";
   const photoKey = (ik) => "walkthrough:photo:" + ik;
 
@@ -408,8 +416,9 @@
     meta:{address:"",unit:"",type:"movein",landlord:"",tenant:"",datein:"",dateout:"",presentin:false,presentout:false},
     items:{},   // itemKey -> {in:'', out:'', notes:'', photoCount:0}
     na:{},      // roomId -> bool
-    settings:{saveOriginals:true}
+    settings:{saveOnExport:true}
   };
+  let sessionOriginalPhotos = []; // [{file, label}] this session only, used for the export-time batch save
   let photoCache = {}; // itemKey -> [base64,...]  (only for items touched/loaded this session)
   let saveTimer = null;
 
@@ -470,25 +479,40 @@
     }catch(e){ console.error("photo save failed", e); }
   }
 
-  // ---------- Save original to device Photos ----------
-  async function trySaveOriginalToPhotos(file, label){
-    if(!state.settings.saveOriginals) return;
-    try{
-      if(navigator.canShare && navigator.canShare({files:[file]})){
-        await navigator.share({files:[file], title: label || "Property Photo"});
-        return; // user got the native share sheet, incl. "Save Image" to Photos
-      }
-    }catch(err){
-      // AbortError = user dismissed the share sheet; nothing to do.
-      if(err && err.name === "AbortError") return;
+  // ---------- Save this session's originals to device Photos (batched at export) ----------
+  // IMPORTANT: this must run SYNCHRONOUSLY, called directly from the Export button's click
+  // handler, before any "await". Safari only allows navigator.share()/window.open() to act
+  // on the user's behalf within the same call stack as their tap ("user activation"). If we
+  // await other async work first (like building the PDF), Safari silently drops that
+  // permission and the share sheet won't appear \u2014 which is the most likely reason the
+  // old per-photo prompt didn't show up reliably on some devices/iOS versions.
+  function saveSessionOriginalsToPhotos(){
+    if(sessionOriginalPhotos.length === 0) return {method:"none", count:0};
+    const files = sessionOriginalPhotos.map(p=>p.file);
+    const title = (state.meta.address || "Property Photos") + " \u2014 " + files.length + " photo" + (files.length===1?"":"s");
+
+    if(navigator.canShare && navigator.canShare({files})){
+      // Fire-and-forget: don't await, so this stays inside the click's activation window.
+      navigator.share({files, title}).catch(err=>{
+        if(!err || err.name !== "AbortError") console.error("share failed", err);
+      });
+      return {method:"share", count: files.length};
     }
-    // Fallback for browsers without file-sharing support: open the original
-    // full-res image in a new tab so the person can long-press \u2192 Save to Photos.
-    try{
+
+    // Universal fallback (works on every iOS/Safari version, no Share API needed):
+    // downloads each original to Files > Downloads. From there, selecting them all and
+    // using Files' own Share > Save to Photos saves them all in one extra step.
+    files.forEach((file, i)=>{
       const url = URL.createObjectURL(file);
-      window.open(url, "_blank");
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = buildFilename() + "-photo-" + (i+1) + ".jpg";
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
       setTimeout(()=>URL.revokeObjectURL(url), 60000);
-    }catch(err){ console.error("could not open original for saving", err); }
+    });
+    return {method:"download", count: files.length};
   }
 
   // ---------- Image compression ----------
@@ -707,9 +731,9 @@
       el.checked = !!state.meta[key];
       el.addEventListener("change", ()=>{ state.meta[key]=el.checked; scheduleSave(); });
     });
-    const saveOrigEl = document.getElementById("m_saveoriginals");
-    saveOrigEl.checked = state.settings.saveOriginals !== false;
-    saveOrigEl.addEventListener("change", ()=>{ state.settings.saveOriginals = saveOrigEl.checked; scheduleSave(); });
+    const saveOnExportEl = document.getElementById("saveOnExport");
+    saveOnExportEl.checked = state.settings.saveOnExport !== false;
+    saveOnExportEl.addEventListener("change", ()=>{ state.settings.saveOnExport = saveOnExportEl.checked; scheduleSave(); });
   }
 
   // ---------- Event delegation ----------
@@ -782,6 +806,7 @@
         const ik = e.target.dataset.ik;
         const file = e.target.files[0];
         if(!file) return;
+        sessionOriginalPhotos.push({file, label: state.meta.address || "Property Photo"});
         try{
           const dataUrl = await compressFile(file);
           const photos = await loadPhotosFor(ik);
@@ -791,7 +816,6 @@
           renderThumbs(ik, photos);
           await savePhotosFor(ik);
           scheduleSave();
-          trySaveOriginalToPhotos(file, state.meta.address || "Property Photo");
         }catch(err){ console.error("photo add failed", err); }
         e.target.value = "";
       }
@@ -808,8 +832,9 @@
     }));
     for(const k of keysToDelete){ try{ await window.storage.delete(k, false); }catch(e){} }
     try{ await window.storage.delete(DATA_KEY, false); }catch(e){}
-    state = {meta:{address:"",unit:"",type:"movein",landlord:"",tenant:"",datein:"",dateout:"",presentin:false,presentout:false}, items:{}, na:{}, settings:{saveOriginals:true}};
+    state = {meta:{address:"",unit:"",type:"movein",landlord:"",tenant:"",datein:"",dateout:"",presentin:false,presentout:false}, items:{}, na:{}, settings:{saveOnExport:true}};
     photoCache = {};
+    sessionOriginalPhotos = [];
     bindMeta();
     renderRooms();
     updateHeaderSub();
@@ -846,7 +871,7 @@
       for(let idx=0; idx<room.items.length; idx++){
         const ik = itemKey(room.id, idx);
         const d = state.items[ik] || {in:"",out:"",notes:"",photoCount:0};
-        html += `<tr><td>${room.items[idx]}</td><td>${d.in||"\u2013"}</td><td>${d.out||"\u2013"}</td><td>${escapeHtml(d.notes||"")}</td></tr>`;
+        html += `<tr><td>${room.items[idx]}</td><td>${condLabel(d.in)}</td><td>${condLabel(d.out)}</td><td>${escapeHtml(d.notes||"")}</td></tr>`;
       }
       html += `</table>`;
       // photos block per room (only items that have photos)
@@ -875,6 +900,12 @@
   }
 
   async function doExport(){
+    // Must happen FIRST and synchronously \u2014 see note on saveSessionOriginalsToPhotos().
+    const saveCheckbox = document.getElementById("saveOnExport");
+    const saveResult = (saveCheckbox && saveCheckbox.checked)
+      ? saveSessionOriginalsToPhotos()
+      : {method:"skipped", count:0};
+
     const btn = document.getElementById("exportBtn2");
     const orig = btn.textContent;
     btn.textContent = "Preparing\u2026";
@@ -897,8 +928,13 @@
     // Nothing is deleted automatically \u2014 offer the choice explicitly.
     const banner = document.getElementById("exportBanner");
     const backdrop = document.getElementById("exportBackdrop");
-    document.getElementById("exportBannerText").textContent =
-      `Exported "${exportName}.pdf". All entries and photos are still saved here \u2014 nothing was deleted.`;
+    let msg = `Exported "${exportName}.pdf". All entries and photos are still saved here \u2014 nothing was deleted.`;
+    if(saveResult.method === "share"){
+      msg += ` A share sheet for your ${saveResult.count} photo${saveResult.count===1?"":"s"} should have opened \u2014 choose "Save ${saveResult.count===1?"Image":"Images"}" to add them to Photos.`;
+    } else if(saveResult.method === "download"){
+      msg += ` Your ${saveResult.count} photo${saveResult.count===1?"":"s"} downloaded to Files > Downloads (this device doesn't support one-tap sharing) \u2014 select them there and use Share > Save to Photos.`;
+    }
+    document.getElementById("exportBannerText").textContent = msg;
     setTimeout(()=>{ banner.classList.add("show"); backdrop.classList.add("show"); }, 400);
   }
 
