@@ -183,7 +183,7 @@
     padding:6px 4px;margin-bottom:10px;}
 
   @media print{
-    header,.footer-bar,.legend,.progress-wrap,#appView{display:none !important;}
+    header,.footer-bar,.legend,.progress-wrap,#appView,.modal-backdrop,.export-banner{display:none !important;}
     #printView{display:block !important;}
     body{padding:0;background:#fff;}
     #printView h1{font-size:20px;color:#1F3864;margin-bottom:2px;}
@@ -918,24 +918,32 @@
     const exportName = buildFilename();
     document.title = exportName;
 
-    const restoreTitle = () => { document.title = originalTitle; };
-    window.addEventListener("afterprint", restoreTitle, {once:true});
-    // Fallback in case afterprint doesn't fire (some iOS Safari versions):
-    setTimeout(restoreTitle, 4000);
-
-    window.print();
-
-    // Nothing is deleted automatically \u2014 offer the choice explicitly.
-    const banner = document.getElementById("exportBanner");
-    const backdrop = document.getElementById("exportBackdrop");
     let msg = `Exported "${exportName}.pdf". All entries and photos are still saved here \u2014 nothing was deleted.`;
     if(saveResult.method === "share"){
       msg += ` A share sheet for your ${saveResult.count} photo${saveResult.count===1?"":"s"} should have opened \u2014 choose "Save ${saveResult.count===1?"Image":"Images"}" to add them to Photos.`;
     } else if(saveResult.method === "download"){
       msg += ` Your ${saveResult.count} photo${saveResult.count===1?"":"s"} downloaded to Files > Downloads (this device doesn't support one-tap sharing) \u2014 select them there and use Share > Save to Photos.`;
     }
-    document.getElementById("exportBannerText").textContent = msg;
-    setTimeout(()=>{ banner.classList.add("show"); backdrop.classList.add("show"); }, 400);
+
+    // Runs once the print/share flow is actually done (the browser fires "afterprint"
+    // when the print dialog/share sheet closes) so the popup can never be captured
+    // in the PDF or shown while iOS is still rendering the page for export.
+    let cleanedUp = false;
+    const afterExportCleanup = () => {
+      if(cleanedUp) return;
+      cleanedUp = true;
+      document.title = originalTitle;
+      const banner = document.getElementById("exportBanner");
+      const backdrop = document.getElementById("exportBackdrop");
+      document.getElementById("exportBannerText").textContent = msg;
+      banner.classList.add("show");
+      backdrop.classList.add("show");
+    };
+    window.addEventListener("afterprint", afterExportCleanup, {once:true});
+    // Fallback in case "afterprint" doesn't fire (happens on some iOS Safari versions):
+    setTimeout(afterExportCleanup, 1500);
+
+    window.print();
   }
 
   // ---------- Init ----------
